@@ -1,0 +1,34 @@
+# 依赖目录
+node_modules/
+server/node_modules/
+
+# 日志文件
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 环境变量文件
+.env
+.env.local
+.env.*.local
+
+# IDE文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+
+# 构建文件
+dist/
+dist-ssr/
+*.local
+
+# 编辑器文件
+.editorconfig

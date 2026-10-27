@@ -1,6 +1,10 @@
 const express = require('express');
 const cors = require('cors');
 const mysql = require('mysql2/promise');
+const path = require('path');
+const fs = require('fs');
+const xlsxReader = require('./xlsxReader');
+const xlsxWriter = require('./xlsxWriter');
 require('dotenv').config({ path: './.env' });
 
 const app = express();
@@ -272,7 +276,7 @@ app.post('/api/c5-proxy', async (req, res) => {
             "itemId": ${itemId},
             "wearMin": ${wearMin || 0},
             "wearMax": ${wearMax || 1},
-            "pageSize": ${pageSize || 10}
+            "pageSize": ${pageSize || 30}
         }`;
         
         // 设置请求头以发送POST请求到C5 API
@@ -324,7 +328,7 @@ app.post('/api/c5-proxy', async (req, res) => {
 // 代理BUFF API请求
 app.get('/api/buff-proxy', async (req, res) => {
     try {
-        const { goods_id, min_paintwear, max_paintwear } = req.query;
+        const { goods_id, min_paintwear, max_paintwear, page_size } = req.query;
         
         if (!goods_id) {
             return res.status(400).json({ 
@@ -354,6 +358,7 @@ app.get('/api/buff-proxy', async (req, res) => {
             game: 'csgo',
             goods_id: goods_id,
             page_num: 1,
+            page_size: page_size || 30,
             sort_by: 'default',
             mode: '',
             allow_tradable_cooldown: 1,
@@ -595,6 +600,177 @@ app.delete('/api/records/clear', async (req, res) => {
         res.status(500).json({
             success: false,
             message: '服务器内部错误'
+        });
+    }
+});
+
+// 读取模板 Excel（moban.xlsx）中指定 sheet 的「名称 + 磨损」清单
+function normalizeWearValue(v) {
+    const n = parseFloat(v);
+    if (isNaN(n)) return String(v).trim();
+    return n.toFixed(2);
+}
+
+// 批量查询只使用 Sheet1
+const TEMPLATE_SHEET = 'Sheet1';
+
+// 返回 Sheet1 的「有效数据行数」（不含表头），供前端展示真实行数
+app.get('/api/template/sheets', (req, res) => {
+    try {
+        const filePath = path.join(__dirname, '..', 'moban.xlsx');
+        const stat = fs.statSync(filePath);
+        const wb = xlsxReader.readXlsx(filePath);
+        const sheet = wb.sheets.find(s => s.name === TEMPLATE_SHEET);
+        if (!sheet) {
+            return res.status(404).json({
+                success: false,
+                message: `模板中未找到 sheet: ${TEMPLATE_SHEET}`,
+                sheets: wb.sheetNames
+            });
+        }
+        const nonEmpty = (sheet.rows || []).filter(r => r && String(r[0] == null ? '' : r[0]).trim() !== '');
+        res.json({
+            success: true,
+            fileName: 'moban.xlsx',
+            sheet: TEMPLATE_SHEET,
+            dataRows: Math.max(0, nonEmpty.length - 1), // 去掉表头
+            modifiedAt: stat.mtime.toISOString()
+        });
+    } catch (error) {
+        console.error('读取模板 sheet 信息失败:', error);
+        res.status(500).json({ success: false, message: '读取模板失败: ' + error.message });
+    }
+});
+
+app.get('/api/template', (req, res) => {
+    try {
+        const sheetName = req.query.sheet || 'Sheet1';
+        const filePath = path.join(__dirname, '..', 'moban.xlsx');
+        const wb = xlsxReader.readXlsx(filePath);
+        const sheet = wb.sheets.find(s => s.name === sheetName);
+        if (!sheet) {
+            return res.status(404).json({ success: false, message: `模板中未找到 sheet: ${sheetName}`, sheets: wb.sheetNames });
+        }
+
+        const rows = sheet.rows;
+        if (!rows.length) {
+            return res.json({ success: true, sheet: sheetName, data: [] });
+        }
+
+        const header = rows[0].map(h => String(h == null ? '' : h).trim());
+        let nameIdx = header.findIndex(h => h === '名称');
+        let wearIdx = header.findIndex(h => h === '磨损');
+        if (nameIdx < 0) nameIdx = 0;
+        if (wearIdx < 0) wearIdx = 1;
+
+        // 价格列（按表头名字定位，找不到则用固定列：C=2, D=3，0 基）
+        const c5Idx = header.findIndex(h => h.indexOf('C5') >= 0 && h.indexOf('价格') >= 0);
+        const buffIdx = header.findIndex(h => h.toUpperCase().indexOf('BUFF') >= 0 && h.indexOf('价格') >= 0);
+
+        const data = [];
+        for (let i = 1; i < rows.length; i++) {
+            const r = rows[i] || [];
+            const name = String(r[nameIdx] == null ? '' : r[nameIdx]).trim();
+            const wear = String(r[wearIdx] == null ? '' : r[wearIdx]).trim();
+            if (!name) continue;
+
+            let minWear = '';
+            let maxWear = '';
+            const m = wear.match(/^\s*([\d.]+)\s*-\s*([\d.]+)\s*$/);
+            if (m) {
+                minWear = normalizeWearValue(m[1]);
+                maxWear = normalizeWearValue(m[2]);
+            }
+
+            const rawCell = (idx) => {
+                if (idx < 0) return '';
+                const v = r[idx];
+                return v == null ? '' : String(v).trim();
+            };
+
+            data.push({
+                name,
+                wear,
+                minWear,
+                maxWear,
+                rowIndex: i + 1, // Excel 中的行号（1 基，含表头）
+                c5Price: rawCell(c5Idx >= 0 ? c5Idx : 2),
+                buffPrice: rawCell(buffIdx >= 0 ? buffIdx : 3)
+            });
+        }
+
+        res.json({ success: true, sheet: sheetName, data });
+    } catch (error) {
+        console.error('读取模板失败:', error);
+        res.status(500).json({ success: false, message: '读取模板失败: ' + error.message });
+    }
+});
+
+// 把网页上输入的价格写回 moban.xlsx（只改 C5/BUFF 两个价格列）
+app.post('/api/template/prices', (req, res) => {
+    try {
+        const updates = Array.isArray(req.body && req.body.updates) ? req.body.updates : [];
+        if (!updates.length) {
+            return res.status(400).json({ success: false, message: '没有需要保存的价格' });
+        }
+
+        const filePath = path.join(__dirname, '..', 'moban.xlsx');
+        const wb = xlsxReader.readXlsx(filePath);
+        const sheet = wb.sheets.find(s => s.name === TEMPLATE_SHEET);
+        if (!sheet) {
+            return res.status(404).json({ success: false, message: `模板中未找到 sheet: ${TEMPLATE_SHEET}` });
+        }
+
+        // 用表头定位价格列，得到列字母（0 基 -> A/B/C...）
+        const header = (sheet.rows[0] || []).map(h => String(h == null ? '' : h).trim());
+        let c5Idx = header.findIndex(h => h.indexOf('C5') >= 0 && h.indexOf('价格') >= 0);
+        let buffIdx = header.findIndex(h => h.toUpperCase().indexOf('BUFF') >= 0 && h.indexOf('价格') >= 0);
+        if (c5Idx < 0) c5Idx = 2;
+        if (buffIdx < 0) buffIdx = 3;
+        const c5Col = xlsxWriter.numToColLetter(c5Idx);
+        const buffCol = xlsxWriter.numToColLetter(buffIdx);
+
+        const cells = [];
+        for (const u of updates) {
+            const row = parseInt(u.rowIndex != null ? u.rowIndex : u.row, 10);
+            if (!row || row < 2) continue;
+
+            if (u.c5Price !== undefined && u.c5Price !== null && String(u.c5Price).trim() !== '') {
+                const v = Number(u.c5Price);
+                if (!isFinite(v) || v < 0) {
+                    return res.status(400).json({ success: false, message: `第 ${row} 行 C5 价格不是有效数字：${u.c5Price}` });
+                }
+                cells.push({ row, col: c5Col, value: v });
+            }
+            if (u.buffPrice !== undefined && u.buffPrice !== null && String(u.buffPrice).trim() !== '') {
+                const v = Number(u.buffPrice);
+                if (!isFinite(v) || v < 0) {
+                    return res.status(400).json({ success: false, message: `第 ${row} 行 BUFF 价格不是有效数字：${u.buffPrice}` });
+                }
+                cells.push({ row, col: buffCol, value: v });
+            }
+        }
+
+        if (!cells.length) {
+            return res.status(400).json({ success: false, message: '没有有效的价格可写入（留空表示不修改）' });
+        }
+
+        const result = xlsxWriter.updateCells(filePath, TEMPLATE_SHEET, cells);
+        console.log(`[模板价格写入] 已更新 ${result.updated} 个单元格，备份：${result.backupPath}`);
+        res.json({
+            success: true,
+            updated: result.updated,
+            warnings: result.warnings,
+            backup: path.basename(result.backupPath)
+        });
+    } catch (error) {
+        console.error('写入模板价格失败:', error);
+        const locked = /EBUSY|EPERM|EACCES/.test(error.code || '') || /busy|denied|being used/i.test(error.message || '');
+        res.status(500).json({
+            success: false,
+            message: locked
+                ? 'moban.xlsx 正被 Excel/WPS 占用，请先关闭该文件后重试'
+                : '写入模板失败: ' + error.message
         });
     }
 });

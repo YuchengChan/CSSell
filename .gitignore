@@ -32,3 +32,9 @@ dist-ssr/
 
 # 编辑器文件
 .editorconfig
+
+# 本地工作数据（记忆/备份/临时文件）
+.workbuddy/
+
+# Excel 写入时的临时文件
+*.xlsx.tmp

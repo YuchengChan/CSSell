@@ -58,12 +58,98 @@
         </el-checkbox-group>
         <el-button type="primary" @click="save">保存</el-button>
     </div>
+    <div style="margin: 10px 0; padding: 12px; border: 1px dashed #c0c4cc; border-radius: 6px;">
+        <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+            <strong>模板批量查询：</strong>
+            <el-tag type="info" effect="plain">Sheet1（{{ templateRowCount }} 行）</el-tag>
+            <el-button :disabled="autoQuerying" @click="loadTemplateSheets(true)">刷新模板</el-button>
+            <el-button type="primary" plain @click="openPriceDialog">编辑模板价格</el-button>
+            <el-button type="success" :loading="autoQuerying" @click="autoQueryFromTemplate">
+                按模板自动查询（每条间隔 10 秒）
+            </el-button>
+            <el-button v-if="autoQuerying" type="danger" @click="stopAutoQuery">停止</el-button>
+            <span v-if="autoProgress.total" style="color: #606266;">
+                {{ autoProgress.current }}/{{ autoProgress.total }} · {{ autoProgress.text }}
+            </span>
+            <span v-if="templateModifiedAt" style="color: #909399; font-size: 12px;">
+                moban.xlsx 修改于 {{ templateModifiedAt }}
+            </span>
+        </div>
+    </div>
+
+    <!-- 编辑模板价格：输入后直接写回 moban.xlsx 的 Sheet1，每一行（每个磨损）可单独保存 -->
+    <el-dialog v-model="priceDialogVisible" :title="priceDialogTitle" width="860px" :close-on-click-modal="false">
+        <div style="margin-bottom: 10px; font-size: 12px; line-height: 1.7;">
+            <div v-if="priceDialogHint" style="color: #e6a23c;">{{ priceDialogHint }}</div>
+            <div style="color: #909399;">
+                改完某一行的价格，点该行右侧「保存本行」即可单独写入 Excel；也可以点底部「全部保存」。留空表示该价格不修改，写入前会自动备份。
+            </div>
+        </div>
+        <el-table :data="priceRows" border max-height="420" size="small">
+            <el-table-column type="index" label="#" width="46" />
+            <el-table-column label="名称" min-width="230">
+                <template #default="{ row }">
+                    <span>{{ row.name }}</span>
+                    <el-tag v-if="row.fromC5Query || row.fromBuffQuery" size="small" type="success" effect="plain" style="margin-left: 6px;">
+                        查询最低价
+                    </el-tag>
+                </template>
+            </el-table-column>
+            <el-table-column prop="wear" label="磨损区间" width="105" />
+            <el-table-column label="C5出售价格" width="140">
+                <template #default="{ row }">
+                    <el-input
+                        v-model="row.c5Price"
+                        size="small"
+                        placeholder="不修改"
+                        :title="priceTitle(row, 'c5')"
+                    >
+                        <template #prepend>¥</template>
+                    </el-input>
+                </template>
+            </el-table-column>
+            <el-table-column label="BUFF出售价格" width="140">
+                <template #default="{ row }">
+                    <el-input
+                        v-model="row.buffPrice"
+                        size="small"
+                        placeholder="不修改"
+                        :title="priceTitle(row, 'buff')"
+                    >
+                        <template #prepend>¥</template>
+                    </el-input>
+                </template>
+            </el-table-column>
+            <el-table-column label="操作" width="140" align="center">
+                <template #default="{ row }">
+                    <el-button
+                        type="primary"
+                        size="small"
+                        :loading="savingRowIndex === row.rowIndex"
+                        :disabled="savingRowIndex !== null && savingRowIndex !== row.rowIndex"
+                        @click="saveOnePriceRow(row)"
+                    >
+                        保存本行
+                    </el-button>
+                </template>
+            </el-table-column>
+        </el-table>
+        <template #footer>
+            <span style="float: left; color: #909399; font-size: 12px; line-height: 32px;">
+                共 {{ priceRows.length }} 行
+            </span>
+            <el-button @click="priceDialogVisible = false">关闭</el-button>
+            <el-button type="primary" :loading="savingPrices" :disabled="savingRowIndex !== null" @click="saveTemplatePrices">
+                全部保存
+            </el-button>
+        </template>
+    </el-dialog>
     <div>
         <el-button type="primary" @click="clearTableData">清空</el-button>
         <el-table :data="tableData" border style="width: 100%">
-                    <el-table-column prop="name" label="名称" width="180" />
-                    <el-table-column prop="wear" label="磨损" width="180" />
-                    <el-table-column prop="type" label="平台" width="180">
+                    <el-table-column prop="name" label="名称" width="170" />
+                    <el-table-column prop="wear" label="磨损" width="150" />
+                    <el-table-column prop="type" label="平台" width="150">
                         <template #default="{ row }">
                             <div v-if="Array.isArray(row.type)">
                                 <el-tag 
@@ -78,7 +164,7 @@
                             <span v-else>{{ row.type }}</span>
                         </template>
                     </el-table-column>
-                    <el-table-column label="价格" width="500">
+                    <el-table-column label="价格" width="450">
                         <template #default="{ row }">
                             <div v-if="row.price && Array.isArray(row.price)">
                                 <div 
@@ -91,9 +177,12 @@
                                         <el-tag 
                                             v-for="(price, index) in parsePriceArray(priceInfo.price)" 
                                             :key="index" 
-                                            :type="getPriceTagType(price, parsePriceArray(priceInfo.price))"
+                                            effect="plain"
+                                            :style="getPriceStyle(price, getRowPrices(row.price)) + (isEditMatched(row, priceInfo.type, price) ? 'box-shadow:0 0 0 2px #409eff;font-weight:700;' : '')"
                                             size="small" 
-                                            style="flex-shrink: 0;"
+                                            class="price-tag-clickable"
+                                            :title="`点击把 ${priceInfo.type} 改价设为 ¥${price}`"
+                                            @click="applyPriceToEdit(row, priceInfo.type, price)"
                                         >
                                             {{ price }}
                                         </el-tag>
@@ -101,6 +190,46 @@
                                 </div>
                             </div>
                             <span v-else>暂无价格数据</span>
+                        </template>
+                    </el-table-column>
+                    <el-table-column label="改价（写入 Excel）" width="215" align="center">
+                        <template #default="{ row }">
+                            <div style="display: flex; flex-direction: column; gap: 6px;">
+                                <div style="display: flex; align-items: center; gap: 4px;">
+                                    <span style="width: 32px; text-align: right; color: #909399; font-size: 12px;">C5</span>
+                                    <el-input-number
+                                        v-model="row.editC5"
+                                        :step="0.01"
+                                        :precision="2"
+                                        :min="0"
+                                        :controls="true"
+                                        controls-position="right"
+                                        size="small"
+                                        style="width: 100%;"
+                                    />
+                                </div>
+                                <div style="display: flex; align-items: center; gap: 4px;">
+                                    <span style="width: 32px; text-align: right; color: #909399; font-size: 12px;">BUFF</span>
+                                    <el-input-number
+                                        v-model="row.editBuff"
+                                        :step="0.01"
+                                        :precision="2"
+                                        :min="0"
+                                        :controls="true"
+                                        controls-position="right"
+                                        size="small"
+                                        style="width: 100%;"
+                                    />
+                                </div>
+                                <el-button
+                                    type="primary"
+                                    size="small"
+                                    :loading="savingRowKey === row._key"
+                                    @click="saveRowPricesInline(row)"
+                                >
+                                    保存此磨损
+                                </el-button>
+                            </div>
                         </template>
                     </el-table-column>
                 </el-table>
@@ -460,8 +589,16 @@ const loadTableData = async () => {
         const result = await response.json();
 
         if (result.success) {
-            // 更新表格数据
-            tableData.value = result.data;
+            // 更新表格数据；同时给每行挂上「改价」用的默认值（= 本次查询的最低价）与唯一 key
+            tableData.value = (result.data || []).map(r => {
+                const row = { ...r }
+                row._key = `${r.name}_${r.wear}`
+                const minC5 = minPriceOf(r.price, 'C5')
+                const minBuff = minPriceOf(r.price, 'BUFF')
+                row.editC5 = minC5 !== null ? Number(minC5) : null
+                row.editBuff = minBuff !== null ? Number(minBuff) : null
+                return row
+            })
         } else {
             ElMessage.error(result.message || '获取数据失败');
         }
@@ -488,17 +625,53 @@ const parsePriceArray = (priceStr) => {
     }
 }
 
-// 获取价格标签类型（根据价格高低决定颜色）
-const getPriceTagType = (currentPrice, allPrices) => {
-    // 将价格转换为数字进行比较
+// 汇总「同一次查询（同一个磨损）」下所有平台的价格，用于统一配色
+// 这样 C5 的 0.46 和 BUFF 的 0.46 是同一个颜色，跨平台可比
+const getRowPrices = (priceList) => {
+    if (!Array.isArray(priceList)) return []
+    const all = []
+    priceList.forEach(item => {
+        parsePriceArray(item && item.price).forEach(v => {
+            const n = parseFloat(v)
+            if (!isNaN(n)) all.push(n)
+        })
+    })
+    return all
+}
+
+// 根据价格生成标签样式：同一价位同色，不同价位不同色（价格由低到高：紫蓝→红，对比更强）
+// allPrices 传的是「同一条查询（同一磨损）里所有平台的价格」，即配色以磨损为单位
+const getPriceStyle = (currentPrice, allPrices) => {
     const currentPriceNum = parseFloat(currentPrice);
-    if (isNaN(currentPriceNum)) return 'success'; // 如果无法转换为数字，使用默认颜色
-    
-    // 找出最低价
-    const minPrice = Math.min(...allPrices.map(p => parseFloat(p)).filter(num => !isNaN(num)));
-    
-    // 如果是最低价，返回primary类型（蓝色），否则返回success类型（绿色）
-    return currentPriceNum === minPrice ? 'primary' : 'success';
+    const nums = (allPrices || []).map(p => parseFloat(p)).filter(num => !isNaN(num));
+
+    // 无法解析时用中性灰
+    if (isNaN(currentPriceNum) || nums.length === 0) {
+        return 'background:#f4f4f5;border:1px solid #dcdfe6;color:#909399;';
+    }
+
+    // 去重升序，得到每个"价位"的排名
+    const uniquePrices = [...new Set(nums)].sort((a, b) => a - b);
+    const count = uniquePrices.length;
+
+    let hue, lightness;
+    if (count <= 1) {
+        hue = 210;
+        lightness = 45;
+    } else {
+        const rank = uniquePrices.indexOf(currentPriceNum);
+        const t = rank / (count - 1);
+        // 色相跨度加大：紫蓝(270) → 红(0)，跨越蓝/青/绿/黄/橙，相邻价位差别更明显
+        hue = 270 - t * 270;
+        // 相邻价位明度交替（亮/暗），进一步拉开对比
+        lightness = rank % 2 === 0 ? 45 : 58;
+    }
+
+    const saturation = 82;
+    const borderColor = `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+    const backgroundColor = `hsl(${hue}, ${saturation}%, 94%)`;
+    const textColor = `hsl(${hue}, ${saturation}%, ${Math.max(lightness - 12, 22)}%)`;
+    return `background:${backgroundColor};border:1px solid ${borderColor};color:${textColor};`;
 }
 
 // 清空表格数据
@@ -544,7 +717,7 @@ const submitForm = async () => {
     const goodsId = selectedSellItem.value.buffID;
     const minPaintwear = formData.value.minWear;
     const maxPaintwear = formData.value.maxWear;
-    const buffProxyUrl = `${API_BASE_URL}/buff-proxy?goods_id=${goodsId}&min_paintwear=${minPaintwear}&max_paintwear=${maxPaintwear}`;
+    const buffProxyUrl = `${API_BASE_URL}/buff-proxy?goods_id=${goodsId}&min_paintwear=${minPaintwear}&max_paintwear=${maxPaintwear}&page_size=30`;
     
     const buffPromise = fetch(buffProxyUrl)
         .then(buffResponse => buffResponse.json())
@@ -599,7 +772,7 @@ const submitForm = async () => {
                     itemId: String(c5ItemId),  // 传递字符串格式给后端，后端会处理精度问题
                     wearMin: wearMin,
                     wearMax: wearMax,
-                    pageSize: 10
+                    pageSize: 30
                 })
                 })
                 .then(c5Response => c5Response.json())
@@ -652,13 +825,425 @@ const submitForm = async () => {
     }
 }
 
+// ===== 模板批量查询（只针对 Sheet1）=====
+const TEMPLATE_SHEET = 'Sheet1'
+const templateRowCount = ref(0)      // Sheet1 的真实数据行数（不含表头）
+const templateModifiedAt = ref('')   // 模板文件最后修改时间
+const autoQuerying = ref(false)
+const autoProgress = ref({ current: 0, total: 0, text: '' })
+let autoCancelled = false
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+
+// 读取 Sheet1 的真实行数（每次「刷新模板」或开始查询前都会重新读盘）
+const loadTemplateSheets = async (notify = false) => {
+    try {
+        const resp = await fetch(`${API_BASE_URL}/template/sheets`)
+        const result = await resp.json()
+        if (!result.success) {
+            if (notify) ElMessage.error(result.message || '读取模板失败')
+            return
+        }
+        templateRowCount.value = result.dataRows || 0
+        if (result.modifiedAt) {
+            templateModifiedAt.value = new Date(result.modifiedAt).toLocaleString('zh-CN', { hour12: false })
+        }
+        if (notify) {
+            ElMessage.success(`模板已刷新：Sheet1 共 ${templateRowCount.value} 行`)
+        }
+    } catch (error) {
+        console.error('读取模板 Sheet1 信息失败:', error)
+        if (notify) ElMessage.error('读取模板失败，请确认后端已启动')
+    }
+}
+
+// ===== 编辑模板价格（写回 moban.xlsx，可按每个磨损单独保存）=====
+const priceDialogVisible = ref(false)
+const priceDialogTitle = ref('编辑模板价格（Sheet1）')
+const priceDialogHint = ref('')
+const priceRows = ref([])
+const savingPrices = ref(false)      // 正在「全部保存」
+const savingRowIndex = ref(null)     // 正在保存的行号（单个磨损保存）
+
+// 拉取模板里的价格行
+const fetchTemplatePriceRows = async () => {
+    const resp = await fetch(`${API_BASE_URL}/template?sheet=${encodeURIComponent(TEMPLATE_SHEET)}`)
+    const result = await resp.json()
+    if (!result.success) {
+        ElMessage.error(result.message || '读取模板失败')
+        return null
+    }
+    return (result.data || []).map(r => ({
+        rowIndex: r.rowIndex,
+        name: r.name,
+        wear: r.wear,
+        c5Price: r.c5Price,
+        buffPrice: r.buffPrice
+    }))
+}
+
+// 输入框悬浮提示（显示「本次查询最低」与「Excel 原值」，便于核对）
+const priceTitle = (row, field) => {
+    const isC5 = field === 'c5'
+    const fromQuery = isC5 ? row.fromC5Query : row.fromBuffQuery
+    const queryMin = isC5 ? row.c5QueryMin : row.buffQueryMin
+    const old = isC5 ? row.c5PriceOld : row.buffPriceOld
+    const oldText = old != null && String(old).trim() !== '' ? `Excel 原值 ¥${old}` : ''
+
+    if (fromQuery) return `本次查询最低 ¥${queryMin}` + (oldText ? `（${oldText}）` : '')
+    return oldText
+}
+
+// 打开弹窗：全部磨损（有查询结果的行按「本次查询最低价」预填，其余保留 Excel 原值）
+const openPriceDialog = async () => {
+    try {
+        const rows = await fetchTemplatePriceRows()
+        if (rows === null) return
+        if (!rows.length) {
+            ElMessage.warning('Sheet1 中没有可编辑的数据行')
+            return
+        }
+
+        // 最近一次查询结果（按 名称+磨损 建索引）：优先取后端最新记录，失败则用页面上已有的数据
+        let queryRows = Array.isArray(tableData.value) ? tableData.value : []
+        try {
+            const recResp = await fetch(`${API_BASE_URL}/records`)
+            const recResult = await recResp.json()
+            if (recResult && recResult.success && Array.isArray(recResult.data)) queryRows = recResult.data
+        } catch (e) {
+            console.warn('读取查询结果失败，改用页面已有数据:', e)
+        }
+
+        const queryIndex = new Map()
+        queryRows.forEach(r => {
+            const key = normName(r.name) + '|' + wearKey(r.wear)
+            if (!queryIndex.has(key)) queryIndex.set(key, r)
+        })
+
+        let c5Count = 0
+        let buffCount = 0
+        priceRows.value = rows.map(r => {
+            const hit = queryIndex.get(normName(r.name) + '|' + wearKey(r.wear))
+            const minC5 = hit ? toPriceNumber(minPriceOf(hit.price, 'C5')) : null
+            const minBuff = hit ? toPriceNumber(minPriceOf(hit.price, 'BUFF')) : null
+            if (minC5 !== null) c5Count++
+            if (minBuff !== null) buffCount++
+            return {
+                ...r,
+                c5PriceOld: r.c5Price,
+                buffPriceOld: r.buffPrice,
+                c5Price: minC5 !== null ? minC5 : r.c5Price,
+                buffPrice: minBuff !== null ? minBuff : r.buffPrice,
+                c5QueryMin: minC5,
+                buffQueryMin: minBuff,
+                fromC5Query: minC5 !== null,
+                fromBuffQuery: minBuff !== null
+            }
+        })
+
+        priceDialogTitle.value = `编辑模板价格（Sheet1 · 共 ${rows.length} 个磨损）`
+        priceDialogHint.value = (c5Count || buffCount)
+            ? `已按最近一次查询的最低价预填：C5 ${c5Count} 行、BUFF ${buffCount} 行；没有查询结果的行仍显示 Excel 原值。确认后点「保存本行」或「全部保存」写入。`
+            : '当前还没有查询结果，显示的是 Excel 里已有的价格（用于批量维护）。'
+        priceDialogVisible.value = true
+    } catch (error) {
+        console.error('读取模板价格失败:', error)
+        ElMessage.error('读取模板失败，请确认后端已启动')
+    }
+}
+
+// 磨损归一化，便于把「查询结果的一行」对到模板里的行
+const wearKey = (s) => {
+    const nums = String(s == null ? '' : s).match(/\d*\.?\d+/g)
+    if (!nums || nums.length < 2) return String(s == null ? '' : s).replace(/\s+/g, '')
+    return Number(nums[0]).toFixed(3) + '~' + Number(nums[1]).toFixed(3)
+}
+const normName = (s) => String(s == null ? '' : s).replace(/\s+/g, '').toLowerCase()
+
+// 取某个平台在本次查询里的最低价（返回原始字符串，保留 0.35 / 1 这种写法）
+const minPriceOf = (priceList, typeName) => {
+    if (!Array.isArray(priceList)) return null
+    const item = priceList.find(p => String(p && p.type || '').toUpperCase() === String(typeName).toUpperCase())
+    if (!item) return null
+    const raw = parsePriceArray(item.price)
+    const nums = raw.map(v => parseFloat(v)).filter(n => !isNaN(n))
+    if (!nums.length) return null
+    const min = Math.min(...nums)
+    const hit = raw.find(v => parseFloat(v) === min)
+    return hit != null ? String(hit) : String(min)
+}
+
+// ===== 点击价格标签 → 填入该行对应平台的改价框 =====
+// 平台 → 改价字段，仅这两个平台有 Excel 价格列
+const PRICE_TYPE_FIELD = { C5: 'editC5', BUFF: 'editBuff' }
+
+const toPriceNumber = (v) => {
+    const n = parseFloat(v)
+    return isNaN(n) ? null : Math.round(n * 100) / 100
+}
+
+// 点击标签：把该价格写入同一行对应平台的输入框（只改输入框，不落盘）
+const applyPriceToEdit = (row, type, price) => {
+    const field = PRICE_TYPE_FIELD[String(type || '').toUpperCase()]
+    const num = toPriceNumber(price)
+    if (!field || num === null) return
+    if (savingRowKey.value === row._key) return  // 保存中不允许改
+    row[field] = num
+}
+
+// 判断某个标签是否就是当前改价框里的值（用于高亮）
+const isEditMatched = (row, type, price) => {
+    const field = PRICE_TYPE_FIELD[String(type || '').toUpperCase()]
+    const num = toPriceNumber(price)
+    if (!field || num === null) return false
+    const cur = toPriceNumber(row[field])
+    return cur !== null && Math.abs(cur - num) < 0.0001
+}
+
+// 模板价格行缓存 + 正在保存的行 key
+const templatePriceRows = ref([])
+const savingRowKey = ref('')
+
+// 按「名称 + 磨损」把查询结果的一行对到模板里的行（缓存，必要时强制刷新）
+const resolveTemplateRow = async (row, forceReload = false) => {
+    if (forceReload || !templatePriceRows.value.length) {
+        const rows = await fetchTemplatePriceRows()
+        if (rows) templatePriceRows.value = rows
+    }
+    const tw = wearKey(row.wear)
+    const tn = normName(row.name)
+    let hit = templatePriceRows.value.find(r => normName(r.name) === tn && wearKey(r.wear) === tw)
+    if (!hit) hit = templatePriceRows.value.find(r => wearKey(r.wear) === tw)
+    return hit || null
+}
+
+// 行内改价：只保存当前这一条磨损
+const saveRowPricesInline = async (row) => {
+    if (savingRowKey.value) return
+
+    // 两个都为空就没有可写的内容
+    if (row.editC5 == null && row.editBuff == null) {
+        ElMessage.warning('请先填写 C5 或 BUFF 的价格')
+        return
+    }
+
+    savingRowKey.value = row._key
+    try {
+        let templateRow = await resolveTemplateRow(row)
+        if (!templateRow) {
+            // 缓存可能过期（比如刚改过 Excel 行），强制刷新再试一次
+            templateRow = await resolveTemplateRow(row, true)
+        }
+        if (!templateRow) {
+            ElMessage.warning(`模板里没有「${row.name}」磨损 ${row.wear} 这一行`)
+            return
+        }
+
+        const result = await postPriceUpdates([{
+            rowIndex: templateRow.rowIndex,
+            c5Price: row.editC5,
+            buffPrice: row.editBuff
+        }])
+        if (!result) return
+
+        ElMessage.success(`已保存：${row.name} 磨损 ${row.wear}（更新 ${result.updated} 个单元格）`)
+        await loadTemplateSheets()
+    } catch (error) {
+        console.error('行内保存价格失败:', error)
+        ElMessage.error('保存失败，请确认后端已启动')
+    } finally {
+        savingRowKey.value = ''
+    }
+}
+
+// 提交一批价格到后端（统一处理提示）
+const postPriceUpdates = async (updates) => {
+    const resp = await fetch(`${API_BASE_URL}/template/prices`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ updates })
+    })
+    const result = await resp.json()
+    if (!result.success) {
+        ElMessage.error(result.message || '保存失败')
+        return null
+    }
+    if (result.warnings && result.warnings.length) {
+        console.warn('部分单元格未写入:', result.warnings)
+        ElMessage.warning(result.warnings.join('；'))
+    }
+    return result
+}
+
+// 只保存「当前这一行（这一个磨损）」
+const saveOnePriceRow = async (row) => {
+    if (savingRowIndex.value !== null) return
+    savingRowIndex.value = row.rowIndex
+    try {
+        const result = await postPriceUpdates([{
+            rowIndex: row.rowIndex,
+            c5Price: row.c5Price,
+            buffPrice: row.buffPrice
+        }])
+        if (!result) return
+
+        ElMessage.success(`已保存：${row.name} 磨损 ${row.wear}（更新 ${result.updated} 个单元格）`)
+        // 只刷新这一行，其它行正在编辑的内容不受影响
+        const rows = await fetchTemplatePriceRows()
+        if (rows) {
+            const fresh = rows.find(r => r.rowIndex === row.rowIndex)
+            if (fresh) {
+                row.c5Price = fresh.c5Price
+                row.buffPrice = fresh.buffPrice
+            }
+        }
+        await loadTemplateSheets()
+    } catch (error) {
+        console.error('保存单行价格失败:', error)
+        ElMessage.error('保存失败，请确认后端已启动')
+    } finally {
+        savingRowIndex.value = null
+    }
+}
+
+// 保存弹窗里的全部行
+const saveTemplatePrices = async () => {
+    if (savingPrices.value) return
+    savingPrices.value = true
+    try {
+        const updates = priceRows.value.map(r => ({
+            rowIndex: r.rowIndex,
+            c5Price: r.c5Price,
+            buffPrice: r.buffPrice
+        }))
+        const result = await postPriceUpdates(updates)
+        if (!result) return
+
+        ElMessage.success(`已写入 moban.xlsx，更新 ${result.updated} 个单元格`)
+        const rows = await fetchTemplatePriceRows()
+        if (rows) priceRows.value = rows
+        await loadTemplateSheets()
+    } catch (error) {
+        console.error('保存模板价格失败:', error)
+        ElMessage.error('保存失败，请确认后端已启动')
+    } finally {
+        savingPrices.value = false
+    }
+}
+
+// 在 sell 列表中按名称查找（先精确，再忽略空格/大小写的宽松匹配）
+const findSellItem = (name) => {
+    const target = String(name || '').trim()
+    if (!target) return null
+    const hit = sellItems.value.find(x => x.name === target)
+    if (hit) return hit
+    const norm = s => String(s || '').replace(/\s+/g, '').toLowerCase()
+    const nt = norm(target)
+    return sellItems.value.find(x => norm(x.name) === nt) || null
+}
+
+const stopAutoQuery = () => {
+    autoCancelled = true
+    autoQuerying.value = false
+    ElMessage.info('已请求停止批量查询')
+}
+
+// 按模板 sheet 里的「名称 + 磨损」逐条查询，每条之间间隔 10 秒
+const autoQueryFromTemplate = async () => {
+    if (autoQuerying.value) return
+    autoQuerying.value = true
+    autoCancelled = false
+    try {
+        // 开始前先重新读一次模板，确保行数与最新 Excel 一致
+        await loadTemplateSheets()
+        const resp = await fetch(`${API_BASE_URL}/template?sheet=${encodeURIComponent(TEMPLATE_SHEET)}`)
+        const result = await resp.json()
+        if (!result.success) {
+            ElMessage.error(result.message || '读取模板失败')
+            return
+        }
+        const rows = (result.data || []).filter(r => r.name)
+        if (!rows.length) {
+            ElMessage.warning('模板中没有可查询的数据行')
+            return
+        }
+
+        autoProgress.value = { current: 0, total: rows.length, text: '' }
+        let okCount = 0
+        let skipCount = 0
+
+        for (let i = 0; i < rows.length; i++) {
+            if (autoCancelled) break
+            const row = rows[i]
+            autoProgress.value.text = `查询中 (${i + 1}/${rows.length})：${row.name} ${row.wear}`
+
+            const item = findSellItem(row.name)
+            if (!item) {
+                skipCount++
+                console.warn('模板中的商品在 sell 表中未找到，已跳过：', row.name, row.wear)
+                ElMessage.warning(`未匹配到商品，已跳过：${row.name}`)
+            } else {
+                // 复用现有查询流程：设置当前商品与磨损后调用 submitForm
+                selectedSellItem.value = item
+                formData.value.sellName = item.name
+                formData.value.minWear = row.minWear
+                formData.value.maxWear = row.maxWear
+                await submitForm()
+                okCount++
+            }
+
+            autoProgress.value.current = i + 1
+
+            // 每条之间间隔 10 秒（最后一条不等）
+            if (i < rows.length - 1 && !autoCancelled) {
+                for (let s = 10; s > 0; s--) {
+                    if (autoCancelled) break
+                    autoProgress.value.text = `等待 ${s} 秒后查询下一条...`
+                    await sleep(1000)
+                }
+            }
+        }
+
+        if (autoCancelled) {
+            ElMessage.info(`批量查询已停止（成功 ${okCount}，跳过 ${skipCount}）`)
+        } else {
+            ElMessage.success(`批量查询完成（成功 ${okCount}，跳过 ${skipCount}）`)
+        }
+    } catch (error) {
+        console.error('模板批量查询失败:', error)
+        ElMessage.error('模板批量查询出错，请检查后端是否启动')
+    } finally {
+        autoQuerying.value = false
+        autoProgress.value.text = ''
+    }
+}
+
 // 在页面加载完成后加载表格数据
 onMounted(async () => {
     await loadTokens();
     await loadSellItems();
     await loadTableData(); // 新增：加载表格数据
+    await loadTemplateSheets(); // 读取模板各 sheet 的真实行数
 });
 
 </script>
 
-<style lang="scss" scoped></style>
+<style scoped>
+/* 价格标签可点击：提示可点、悬停微浮起 */
+.price-tag-clickable {
+    cursor: pointer;
+    user-select: none;
+    transition: transform 0.12s ease, filter 0.12s ease, box-shadow 0.12s ease;
+}
+
+.price-tag-clickable:hover {
+    transform: translateY(-1px);
+    filter: brightness(1.05);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+}
+
+.price-tag-clickable:active {
+    transform: translateY(0);
+    filter: brightness(0.96);
+}
+</style>

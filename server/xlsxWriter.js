@@ -197,8 +197,10 @@ function numToColLetter(n) {
 }
 
 // 在 sheet xml 中写入某个单元格的数值，保留原有样式 s
+// valueText 为空字符串时表示「清空该单元格」（写成 <c r="C2"/>，保留样式）
 function upsertNumericCell(xml, rowNum, colLetter, valueText) {
     const ref = colLetter + rowNum;
+    const isEmpty = valueText === '';
     const rowRe = new RegExp(`<row\\b[^>]*\\br="${rowNum}"[^>]*>[\\s\\S]*?</row>`);
     const rowMatch = xml.match(rowRe);
     if (!rowMatch) return { xml, ok: false, reason: `第 ${rowNum} 行不存在` };
@@ -213,11 +215,15 @@ function upsertNumericCell(xml, rowNum, colLetter, valueText) {
 
     let newInner;
     if (cellMatch) {
-        // 保留除 t 以外的属性（t="s" 之类要去掉，因为改成数值了）
+        // 保留除 t 以外的属性（t="s" 之类要去掉，因为改成数值/空了）
         const attrs = cellMatch[1].replace(/\s+t="[^"]*"/g, '');
-        newInner = inner.replace(cellMatch[0], `<c${attrs}><v>${valueText}</v></c>`);
+        const newCell = isEmpty ? `<c${attrs}/>` : `<c${attrs}><v>${valueText}</v></c>`;
+        newInner = inner.replace(cellMatch[0], newCell);
     } else {
-        // 单元格不存在：按列顺序插入
+        // 单元格不存在：清空时无需插入；写数值时按列顺序插入
+        if (isEmpty) {
+            return { xml, ok: true, reason: null };
+        }
         const targetCol = colLetterToNum(colLetter);
         let insertAt = inner.length;
         const anyCellRe = /<c\b([^>]*?)(?:\/>|>[\s\S]*?<\/c>)/g;
@@ -248,7 +254,7 @@ function formatNumber(v) {
  * 修改某个 sheet 里若干单元格的数值
  * @param {string} filePath  xlsx 路径
  * @param {string} sheetName sheet 名（如 'Sheet1'）
- * @param {Array<{row:number,col:string,value:number|string}>} cells  row 为 Excel 的 1 基行号，col 为列字母
+ * @param {Array<{row:number,col:string,value:number|string|null}>} cells  row 为 Excel 的 1 基行号，col 为列字母；value 为 null/'' 表示清空该格
  * @returns {{updated:number, backupPath:string, warnings:string[]}}
  */
 function updateCells(filePath, sheetName, cells) {
@@ -265,8 +271,10 @@ function updateCells(filePath, sheetName, cells) {
     let updated = 0;
 
     for (const cell of cells) {
-        const valueText = formatNumber(cell.value);
-        if (valueText === null) {
+        // value 为 null / 空字符串 → 把该单元格清空（覆盖为空白）
+        const isEmpty = cell.value === null || cell.value === undefined || String(cell.value).trim() === '';
+        const valueText = isEmpty ? '' : formatNumber(cell.value);
+        if (!isEmpty && valueText === null) {
             warnings.push(`第 ${cell.row} 行 ${cell.col} 列的值不是有效数字，已跳过`);
             continue;
         }

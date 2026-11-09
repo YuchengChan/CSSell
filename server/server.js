@@ -735,24 +735,35 @@ app.post('/api/template/prices', (req, res) => {
             const row = parseInt(u.rowIndex != null ? u.rowIndex : u.row, 10);
             if (!row || row < 2) continue;
 
-            if (u.c5Price !== undefined && u.c5Price !== null && String(u.c5Price).trim() !== '') {
-                const v = Number(u.c5Price);
-                if (!isFinite(v) || v < 0) {
-                    return res.status(400).json({ success: false, message: `第 ${row} 行 C5 价格不是有效数字：${u.c5Price}` });
+            // 约定：字段不存在（undefined）= 该项不修改；null / 空字符串 = 把该格清空
+            if (u.c5Price !== undefined) {
+                const raw = u.c5Price
+                if (raw === null || String(raw).trim() === '') {
+                    cells.push({ row, col: c5Col, value: null })
+                } else {
+                    const v = Number(raw)
+                    if (!isFinite(v) || v < 0) {
+                        return res.status(400).json({ success: false, message: `第 ${row} 行 C5 价格不是有效数字：${raw}` });
+                    }
+                    cells.push({ row, col: c5Col, value: v })
                 }
-                cells.push({ row, col: c5Col, value: v });
             }
-            if (u.buffPrice !== undefined && u.buffPrice !== null && String(u.buffPrice).trim() !== '') {
-                const v = Number(u.buffPrice);
-                if (!isFinite(v) || v < 0) {
-                    return res.status(400).json({ success: false, message: `第 ${row} 行 BUFF 价格不是有效数字：${u.buffPrice}` });
+            if (u.buffPrice !== undefined) {
+                const raw = u.buffPrice
+                if (raw === null || String(raw).trim() === '') {
+                    cells.push({ row, col: buffCol, value: null })
+                } else {
+                    const v = Number(raw)
+                    if (!isFinite(v) || v < 0) {
+                        return res.status(400).json({ success: false, message: `第 ${row} 行 BUFF 价格不是有效数字：${raw}` });
+                    }
+                    cells.push({ row, col: buffCol, value: v })
                 }
-                cells.push({ row, col: buffCol, value: v });
             }
         }
 
         if (!cells.length) {
-            return res.status(400).json({ success: false, message: '没有有效的价格可写入（留空表示不修改）' });
+            return res.status(400).json({ success: false, message: '没有可写入的价格（未传价格字段表示不修改）' });
         }
 
         const result = xlsxWriter.updateCells(filePath, TEMPLATE_SHEET, cells);

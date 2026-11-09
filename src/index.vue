@@ -82,7 +82,7 @@
         <div style="margin-bottom: 10px; font-size: 12px; line-height: 1.7;">
             <div v-if="priceDialogHint" style="color: #e6a23c;">{{ priceDialogHint }}</div>
             <div style="color: #909399;">
-                改完某一行的价格，点该行右侧「保存本行」即可单独写入 Excel；也可以点底部「全部保存」。留空表示该价格不修改，写入前会自动备份。
+                改完某一行的价格，点该行右侧「保存本行」即可单独写入 Excel；也可以点底部「全部保存」。留空 = 把该单元格清空（覆盖为空），写入前会自动备份。
             </div>
         </div>
         <el-table :data="priceRows" border max-height="420" size="small">
@@ -101,7 +101,7 @@
                     <el-input
                         v-model="row.c5Price"
                         size="small"
-                        placeholder="不修改"
+                        placeholder="留空=清空"
                         :title="priceTitle(row, 'c5')"
                     >
                         <template #prepend>¥</template>
@@ -113,7 +113,7 @@
                     <el-input
                         v-model="row.buffPrice"
                         size="small"
-                        placeholder="不修改"
+                        placeholder="留空=清空"
                         :title="priceTitle(row, 'buff')"
                     >
                         <template #prepend>¥</template>
@@ -186,17 +186,28 @@
                                         >
                                             {{ price }}
                                         </el-tag>
+                                        <!-- 空值：点击后该平台留空，保存时把 Excel 原价格覆盖为空 -->
+                                        <el-tag
+                                            size="small"
+                                            effect="plain"
+                                            class="price-tag-clickable price-tag-empty"
+                                            :style="isPriceFieldEmpty(row, priceInfo.type) ? 'background:#ecf5ff;border:1px dashed #409eff;color:#409eff;font-weight:700;' : 'background:#fafafa;border:1px dashed #c0c4cc;color:#909399;'"
+                                            title="置为空值：保存时把 Excel 里原来的价格覆盖为空"
+                                            @click="clearPriceField(row, PRICE_TYPE_FIELD[String(priceInfo.type || '').toUpperCase()])"
+                                        >
+                                            空
+                                        </el-tag>
                                     </div>
                                 </div>
                             </div>
                             <span v-else>暂无价格数据</span>
                         </template>
                     </el-table-column>
-                    <el-table-column label="改价（写入 Excel）" width="215" align="center">
+                    <el-table-column label="改价（写入 Excel）" width="252" align="center">
                         <template #default="{ row }">
                             <div style="display: flex; flex-direction: column; gap: 6px;">
                                 <div style="display: flex; align-items: center; gap: 4px;">
-                                    <span style="width: 32px; text-align: right; color: #909399; font-size: 12px;">C5</span>
+                                    <span style="width: 30px; text-align: right; color: #909399; font-size: 12px;">C5</span>
                                     <el-input-number
                                         v-model="row.editC5"
                                         :step="0.01"
@@ -205,11 +216,19 @@
                                         :controls="true"
                                         controls-position="right"
                                         size="small"
-                                        style="width: 100%;"
+                                        placeholder="空"
+                                        style="flex: 1;"
                                     />
+                                    <el-button
+                                        link
+                                        size="small"
+                                        :disabled="row.editC5 == null"
+                                        title="置为空值：保存时把 C5 原价格覆盖为空"
+                                        @click="clearPriceField(row, 'editC5')"
+                                    >✕</el-button>
                                 </div>
                                 <div style="display: flex; align-items: center; gap: 4px;">
-                                    <span style="width: 32px; text-align: right; color: #909399; font-size: 12px;">BUFF</span>
+                                    <span style="width: 30px; text-align: right; color: #909399; font-size: 12px;">BUFF</span>
                                     <el-input-number
                                         v-model="row.editBuff"
                                         :step="0.01"
@@ -218,8 +237,16 @@
                                         :controls="true"
                                         controls-position="right"
                                         size="small"
-                                        style="width: 100%;"
+                                        placeholder="空"
+                                        style="flex: 1;"
                                     />
+                                    <el-button
+                                        link
+                                        size="small"
+                                        :disabled="row.editBuff == null"
+                                        title="置为空值：保存时把 BUFF 原价格覆盖为空"
+                                        @click="clearPriceField(row, 'editBuff')"
+                                    >✕</el-button>
                                 </div>
                                 <el-button
                                     type="primary"
@@ -597,6 +624,11 @@ const loadTableData = async () => {
                 const minBuff = minPriceOf(r.price, 'BUFF')
                 row.editC5 = minC5 !== null ? Number(minC5) : null
                 row.editBuff = minBuff !== null ? Number(minBuff) : null
+                // 记录「初始值」：用于区分「从头就没数据」和「用户把它清空了」
+                row.initC5 = row.editC5
+                row.initBuff = row.editBuff
+                row.clearedC5 = false
+                row.clearedBuff = false
                 return row
             })
         } else {
@@ -989,6 +1021,8 @@ const applyPriceToEdit = (row, type, price) => {
     if (!field || num === null) return
     if (savingRowKey.value === row._key) return  // 保存中不允许改
     row[field] = num
+    if (field === 'editC5') row.clearedC5 = false
+    else row.clearedBuff = false
 }
 
 // 判断某个标签是否就是当前改价框里的值（用于高亮）
@@ -998,6 +1032,22 @@ const isEditMatched = (row, type, price) => {
     if (!field || num === null) return false
     const cur = toPriceNumber(row[field])
     return cur !== null && Math.abs(cur - num) < 0.0001
+}
+
+// 置为空值：该平台留空，保存时会把 Excel 里原来的价格覆盖为空
+const clearPriceField = (row, field) => {
+    if (!row || !field) return
+    if (!Object.values(PRICE_TYPE_FIELD).includes(field)) return
+    if (savingRowKey.value === row._key) return  // 保存中不允许改
+    row[field] = null
+    if (field === 'editC5') row.clearedC5 = true
+    else row.clearedBuff = true
+}
+
+// 该平台当前是否为空值（用于「空」标签高亮）
+const isPriceFieldEmpty = (row, type) => {
+    const field = PRICE_TYPE_FIELD[String(type || '').toUpperCase()]
+    return field ? row[field] == null : false
 }
 
 // 模板价格行缓存 + 正在保存的行 key
@@ -1018,12 +1068,29 @@ const resolveTemplateRow = async (row, forceReload = false) => {
 }
 
 // 行内改价：只保存当前这一条磨损
+// 约定：有数值 → 写入；被清空（原本有值或点了「空」）→ 把该格覆盖为空；从头就没数据 → 不动
 const saveRowPricesInline = async (row) => {
     if (savingRowKey.value) return
 
-    // 两个都为空就没有可写的内容
-    if (row.editC5 == null && row.editBuff == null) {
-        ElMessage.warning('请先填写 C5 或 BUFF 的价格')
+    const update = { rowIndex: null }
+    const cleared = []
+
+    if (row.editC5 != null) {
+        update.c5Price = row.editC5
+    } else if (row.initC5 != null || row.clearedC5) {
+        update.c5Price = null
+        cleared.push('C5')
+    }
+
+    if (row.editBuff != null) {
+        update.buffPrice = row.editBuff
+    } else if (row.initBuff != null || row.clearedBuff) {
+        update.buffPrice = null
+        cleared.push('BUFF')
+    }
+
+    if (update.c5Price === undefined && update.buffPrice === undefined) {
+        ElMessage.warning('没有需要保存的价格：请填写 C5 / BUFF，或点「空」把该格清空')
         return
     }
 
@@ -1039,14 +1106,18 @@ const saveRowPricesInline = async (row) => {
             return
         }
 
-        const result = await postPriceUpdates([{
-            rowIndex: templateRow.rowIndex,
-            c5Price: row.editC5,
-            buffPrice: row.editBuff
-        }])
+        update.rowIndex = templateRow.rowIndex
+        const result = await postPriceUpdates([update])
         if (!result) return
 
-        ElMessage.success(`已保存：${row.name} 磨损 ${row.wear}（更新 ${result.updated} 个单元格）`)
+        const clearText = cleared.length ? `，已清空 ${cleared.join(' / ')}` : ''
+        ElMessage.success(`已保存：${row.name} 磨损 ${row.wear}（更新 ${result.updated} 个单元格${clearText}）`)
+
+        // 保存后同步本地的「初始值」，避免下次重复判定为清空
+        row.initC5 = row.editC5
+        row.initBuff = row.editBuff
+        row.clearedC5 = false
+        row.clearedBuff = false
         await loadTemplateSheets()
     } catch (error) {
         console.error('行内保存价格失败:', error)

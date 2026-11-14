@@ -64,9 +64,15 @@
             <el-tag type="info" effect="plain">Sheet1（{{ templateRowCount }} 行）</el-tag>
             <el-button :disabled="autoQuerying" @click="loadTemplateSheets(true)">刷新模板</el-button>
             <el-button type="primary" plain @click="openPriceDialog">编辑模板价格</el-button>
-            <el-button type="success" :loading="autoQuerying" @click="autoQueryFromTemplate">
+            <el-button
+                type="success"
+                :loading="autoQuerying"
+                title="按 Sheet1 逐条查询；某个磨损在 12 小时内已经查过会自动跳过"
+                @click="autoQueryFromTemplate"
+            >
                 按模板自动查询（每条间隔 10 秒）
             </el-button>
+            <el-tag type="warning" effect="plain" size="small">12 小时内查过的磨损自动跳过</el-tag>
             <el-button v-if="autoQuerying" type="danger" @click="stopAutoQuery">停止</el-button>
             <span v-if="autoProgress.total" style="color: #606266;">
                 {{ autoProgress.current }}/{{ autoProgress.total }} · {{ autoProgress.text }}
@@ -147,6 +153,7 @@
     <div>
         <el-button type="primary" @click="clearTableData">清空</el-button>
         <el-table :data="tableData" border style="width: 100%">
+                    <el-table-column type="index" label="序号" width="64" align="center" />
                     <el-table-column prop="name" label="名称" width="170" />
                     <el-table-column prop="wear" label="磨损" width="150" />
                     <el-table-column prop="type" label="平台" width="150">
@@ -166,41 +173,49 @@
                     </el-table-column>
                     <el-table-column label="价格" width="450">
                         <template #default="{ row }">
-                            <div v-if="row.price && Array.isArray(row.price)">
-                                <div 
-                                    v-for="priceInfo in row.price" 
-                                    :key="priceInfo.type"
+                            <div v-if="row.priceGroups && row.priceGroups.length">
+                                <div
+                                    v-for="group in row.priceGroups"
+                                    :key="group.type"
                                     style="margin-bottom: 10px;"
                                 >
-                                    <strong>{{ priceInfo.type }}:</strong>
-                                    <div class="price-container" style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">
-                                        <el-tag 
-                                            v-for="(price, index) in parsePriceArray(priceInfo.price)" 
-                                            :key="index" 
-                                            effect="plain"
-                                            :style="getPriceStyle(price, getRowPrices(row.price)) + (isEditMatched(row, priceInfo.type, price) ? 'box-shadow:0 0 0 2px #409eff;font-weight:700;' : '')"
-                                            size="small" 
-                                            class="price-tag-clickable"
-                                            :title="`点击把 ${priceInfo.type} 改价设为 ¥${price}`"
-                                            @click="applyPriceToEdit(row, priceInfo.type, price)"
-                                        >
-                                            {{ price }}
-                                        </el-tag>
+                                    <strong>{{ group.type }}:</strong>
+                                    <div class="price-container">
+                                        <!-- 用 span 代替 el-tag：标签数量很多（每行几十个），纯元素渲染开销小得多 -->
+                                        <span
+                                            v-for="tag in group.tags"
+                                            :key="tag.key"
+                                            class="price-pill price-tag-clickable"
+                                            :class="{ 'price-pill-active': isTagActive(row, group.field, tag.num) }"
+                                            :style="tag.style"
+                                            :title="`点击把 ${group.type} 改价设为 ¥${tag.text}`"
+                                            @click="applyPriceToEdit(row, group.type, tag.text)"
+                                        >{{ tag.text }}</span>
                                         <!-- 空值：点击后该平台留空，保存时把 Excel 原价格覆盖为空 -->
-                                        <el-tag
-                                            size="small"
-                                            effect="plain"
-                                            class="price-tag-clickable price-tag-empty"
-                                            :style="isPriceFieldEmpty(row, priceInfo.type) ? 'background:#ecf5ff;border:1px dashed #409eff;color:#409eff;font-weight:700;' : 'background:#fafafa;border:1px dashed #c0c4cc;color:#909399;'"
+                                        <span
+                                            class="price-pill price-tag-clickable price-tag-empty"
+                                            :class="{ 'price-pill-empty-active': fieldIsEmpty(row, group.field) }"
                                             title="置为空值：保存时把 Excel 里原来的价格覆盖为空"
-                                            @click="clearPriceField(row, PRICE_TYPE_FIELD[String(priceInfo.type || '').toUpperCase()])"
-                                        >
-                                            空
-                                        </el-tag>
+                                            @click="clearPriceField(row, group.field)"
+                                        >空</span>
                                     </div>
                                 </div>
                             </div>
                             <span v-else>暂无价格数据</span>
+                        </template>
+                    </el-table-column>
+                    <el-table-column label="时间" width="150" align="center">
+                        <template #default="{ row }">
+                            <div style="display: flex; flex-direction: column; gap: 4px; font-size: 12px; line-height: 1.5;">
+                                <div :title="queryTimeTitle(row)">
+                                    <span style="color: #909399;">查询</span>
+                                    <span style="color: #303133; margin-left: 4px;">{{ formatTime(row.createdAt) }}</span>
+                                </div>
+                                <div :title="saveTimes[row._key] ? '上次点「保存此磨损」的时间' : '还没有保存过'">
+                                    <span style="color: #909399;">保存</span>
+                                    <span :style="saveTimeStyle(row)">{{ formatTime(saveTimes[row._key]) }}</span>
+                                </div>
+                            </div>
                         </template>
                     </el-table-column>
                     <el-table-column label="改价（写入 Excel）" width="252" align="center">
@@ -267,7 +282,7 @@
         </template>
 
 <script setup>
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, computed, watch, markRaw } from 'vue'
 import { ElMessage } from 'element-plus'
 
 const buffToken = ref('')
@@ -609,6 +624,96 @@ const save = async () => {
     }
 }
 
+// 每个磨损「保存此磨损」的时间（key = 名称_磨损），存本地，刷新页面后仍在
+const SAVE_TIME_STORAGE_KEY = 'cs_sell_save_times'
+const saveTimes = ref({})
+
+const loadSaveTimes = () => {
+    try {
+        const raw = localStorage.getItem(SAVE_TIME_STORAGE_KEY)
+        saveTimes.value = raw ? (JSON.parse(raw) || {}) : {}
+    } catch (error) {
+        console.warn('读取保存时间缓存失败:', error)
+        saveTimes.value = {}
+    }
+}
+
+const persistSaveTimes = () => {
+    try {
+        localStorage.setItem(SAVE_TIME_STORAGE_KEY, JSON.stringify(saveTimes.value))
+    } catch (error) {
+        console.warn('写入保存时间缓存失败:', error)
+    }
+}
+
+const markRowSaved = (row, at) => {
+    if (!row || !row._key) return
+    saveTimes.value = { ...saveTimes.value, [row._key]: at || Date.now() }
+    persistSaveTimes()
+}
+
+// 按「名称 + 磨损」标记保存时间（弹窗里保存时用，磨损写法可能不同，需要归一化）
+const markSavedByWear = (name, wear, at) => {
+    const when = at || Date.now()
+    const tn = normName(name)
+    const tw = wearKey(wear)
+    const next = { ...saveTimes.value }
+    let touched = false
+    ;(tableData.value || []).forEach(r => {
+        if (normName(r.name) === tn && wearKey(r.wear) === tw) {
+            next[r._key] = when
+            touched = true
+        }
+    })
+    if (touched) {
+        saveTimes.value = next
+        persistSaveTimes()
+    }
+}
+
+// 统一解析成 Date（支持 Date / 时间戳 / ISO / MySQL "2026-11-14 23:15:44" 写法）
+const toDate = (val) => {
+    if (val === null || val === undefined || val === '') return null
+    let d
+    if (val instanceof Date) {
+        d = val
+    } else if (typeof val === 'number') {
+        d = new Date(val)
+    } else {
+        // Safari 不认 "YYYY-MM-DD HH:mm:ss"，替换成 T；无时区信息时按东八区
+        const s = String(val).trim().replace(' ', 'T')
+        d = new Date(/[zZ]|[+-]\d{2}:?\d{2}$/.test(s) ? s : s + '+08:00')
+    }
+    return isNaN(d.getTime()) ? null : d
+}
+
+// 统一时间格式：MM-DD HH:mm:ss
+const formatTime = (val) => {
+    if (val === null || val === undefined || val === '') return '—'
+    const d = toDate(val)
+    if (!d) return String(val)
+    const p = (n) => String(n).padStart(2, '0')
+    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+// 保存时间的颜色：绿色=已保存最新价格；橙色=查询时间比保存时间新（查了还没保存）；灰色=从未保存
+const saveTimeStyle = (row) => {
+    const savedAt = saveTimes.value[row && row._key]
+    if (!savedAt) return 'color: #c0c4cc; margin-left: 4px;'
+    const queryAt = toDate(row && row.createdAt)
+    if (queryAt && savedAt < queryAt.getTime()) return 'color: #e6a23c; margin-left: 4px; font-weight: 600;'
+    return 'color: #67c23a; margin-left: 4px;'
+}
+
+// 查询时间的悬浮提示：列出各平台各自的查询时间
+const queryTimeTitle = (row) => {
+    if (!row || !row.createdAt) return '暂无查询时间'
+    const lines = ['价格查询时间：' + formatTime(row.createdAt)]
+    const times = row.typeTimes || {}
+    Object.keys(times).forEach(t => lines.push(`${t}：${formatTime(times[t])}`))
+    return lines.join('\n')
+}
+
 // 加载表格数据
 const loadTableData = async () => {
     try {
@@ -620,6 +725,8 @@ const loadTableData = async () => {
             tableData.value = (result.data || []).map(r => {
                 const row = { ...r }
                 row._key = `${r.name}_${r.wear}`
+                // 价格标签的文本 / 颜色在这里一次算好；markRaw 避免上万个标签对象被深度响应式代理（渲染更省）
+                row.priceGroups = markRaw(buildPriceGroups(r.price))
                 const minC5 = minPriceOf(r.price, 'C5')
                 const minBuff = minPriceOf(r.price, 'BUFF')
                 row.editC5 = minC5 !== null ? Number(minC5) : null
@@ -657,41 +764,21 @@ const parsePriceArray = (priceStr) => {
     }
 }
 
-// 汇总「同一次查询（同一个磨损）」下所有平台的价格，用于统一配色
-// 这样 C5 的 0.46 和 BUFF 的 0.46 是同一个颜色，跨平台可比
-const getRowPrices = (priceList) => {
-    if (!Array.isArray(priceList)) return []
-    const all = []
-    priceList.forEach(item => {
-        parsePriceArray(item && item.price).forEach(v => {
-            const n = parseFloat(v)
-            if (!isNaN(n)) all.push(n)
-        })
-    })
-    return all
-}
 
 // 根据价格生成标签样式：同一价位同色，不同价位不同色（价格由低到高：紫蓝→红，对比更强）
 // allPrices 传的是「同一条查询（同一磨损）里所有平台的价格」，即配色以磨损为单位
-const getPriceStyle = (currentPrice, allPrices) => {
-    const currentPriceNum = parseFloat(currentPrice);
-    const nums = (allPrices || []).map(p => parseFloat(p)).filter(num => !isNaN(num));
-
-    // 无法解析时用中性灰
-    if (isNaN(currentPriceNum) || nums.length === 0) {
+// 注意：模板里不要直接调用它（每行几十个标签，重复计算会明显掉帧），
+// 统一在 loadTableData 里用 buildPriceGroups 预计算好，模板只负责展示。
+const priceStyleByRank = (rank, count) => {
+    if (count <= 0 || rank == null || rank < 0) {
         return 'background:#f4f4f5;border:1px solid #dcdfe6;color:#909399;';
     }
-
-    // 去重升序，得到每个"价位"的排名
-    const uniquePrices = [...new Set(nums)].sort((a, b) => a - b);
-    const count = uniquePrices.length;
 
     let hue, lightness;
     if (count <= 1) {
         hue = 210;
         lightness = 45;
     } else {
-        const rank = uniquePrices.indexOf(currentPriceNum);
         const t = rank / (count - 1);
         // 色相跨度加大：紫蓝(270) → 红(0)，跨越蓝/青/绿/黄/橙，相邻价位差别更明显
         hue = 270 - t * 270;
@@ -706,6 +793,46 @@ const getPriceStyle = (currentPrice, allPrices) => {
     return `background:${backgroundColor};border:1px solid ${borderColor};color:${textColor};`;
 }
 
+/**
+ * 把一条记录的 price 字段预处理成「模板可直接渲染」的结构（在 loadTableData 里调用一次）
+ * 返回 [{ type, field, tags: [{ key, text, num, style }] }]
+ * 同一磨损下所有平台的价格合并计算色阶，保证同价同色。
+ */
+const buildPriceGroups = (priceList) => {
+    if (!Array.isArray(priceList)) return []
+
+    // 第一遍：解析出每个平台的价格数组
+    const groups = []
+    const allNums = []
+    priceList.forEach(item => {
+        if (!item) return
+        const values = []
+        parsePriceArray(item.price).forEach(v => {
+            const n = parseFloat(v)
+            if (!isNaN(n)) values.push(n)
+        })
+        groups.push({ type: item.type, values })
+        for (let i = 0; i < values.length; i++) allNums.push(values[i])
+    })
+
+    // 整行共用一套色阶；用 Map 记排名，避免每个标签都 indexOf
+    const uniquePrices = [...new Set(allNums)].sort((a, b) => a - b)
+    const rankMap = new Map()
+    uniquePrices.forEach((v, i) => rankMap.set(v, i))
+    const count = uniquePrices.length
+
+    return groups.map(g => ({
+        type: g.type,
+        field: PRICE_TYPE_FIELD[String(g.type || '').toUpperCase()] || null,
+        tags: g.values.map((n, i) => ({
+            key: g.type + '-' + i,
+            text: String(g.values[i]),
+            num: Number(n.toFixed(2)),
+            style: priceStyleByRank(rankMap.get(n), count)
+        }))
+    }))
+}
+
 // 清空表格数据
 const clearTableData = async () => {
     try {
@@ -718,6 +845,8 @@ const clearTableData = async () => {
         if (result.success) {
             ElMessage.success('表格数据已清空');
             tableData.value = []; // 清空本地数据
+            saveTimes.value = {}; // 查询记录清空了，保存时间也一并清掉
+            persistSaveTimes();
         } else {
             ElMessage.error(result.message || '清空数据失败');
         }
@@ -1025,13 +1154,11 @@ const applyPriceToEdit = (row, type, price) => {
     else row.clearedBuff = false
 }
 
-// 判断某个标签是否就是当前改价框里的值（用于高亮）
-const isEditMatched = (row, type, price) => {
-    const field = PRICE_TYPE_FIELD[String(type || '').toUpperCase()]
-    const num = toPriceNumber(price)
-    if (!field || num === null) return false
-    const cur = toPriceNumber(row[field])
-    return cur !== null && Math.abs(cur - num) < 0.0001
+// 预计算版本的「标签是否被选中」：只做数字比较，模板里每帧调用也不会卡
+const isTagActive = (row, field, num) => {
+    if (!field) return false
+    const cur = row[field]
+    return cur != null && Math.abs(cur - num) < 0.005
 }
 
 // 置为空值：该平台留空，保存时会把 Excel 里原来的价格覆盖为空
@@ -1049,6 +1176,9 @@ const isPriceFieldEmpty = (row, type) => {
     const field = PRICE_TYPE_FIELD[String(type || '').toUpperCase()]
     return field ? row[field] == null : false
 }
+
+// 已经拿到字段名时用这个，少一次 map 查找
+const fieldIsEmpty = (row, field) => (field ? row[field] == null : false)
 
 // 模板价格行缓存 + 正在保存的行 key
 const templatePriceRows = ref([])
@@ -1111,7 +1241,11 @@ const saveRowPricesInline = async (row) => {
         if (!result) return
 
         const clearText = cleared.length ? `，已清空 ${cleared.join(' / ')}` : ''
+        const savedAt = Date.now()
         ElMessage.success(`已保存：${row.name} 磨损 ${row.wear}（更新 ${result.updated} 个单元格${clearText}）`)
+
+        // 记录本次保存时间，显示在「时间」列
+        markRowSaved(row, savedAt)
 
         // 保存后同步本地的「初始值」，避免下次重复判定为清空
         row.initC5 = row.editC5
@@ -1159,6 +1293,7 @@ const saveOnePriceRow = async (row) => {
         if (!result) return
 
         ElMessage.success(`已保存：${row.name} 磨损 ${row.wear}（更新 ${result.updated} 个单元格）`)
+        markSavedByWear(row.name, row.wear)
         // 只刷新这一行，其它行正在编辑的内容不受影响
         const rows = await fetchTemplatePriceRows()
         if (rows) {
@@ -1191,6 +1326,8 @@ const saveTemplatePrices = async () => {
         if (!result) return
 
         ElMessage.success(`已写入 moban.xlsx，更新 ${result.updated} 个单元格`)
+        const savedAt = Date.now()
+        priceRows.value.forEach(r => markSavedByWear(r.name, r.wear, savedAt))
         const rows = await fetchTemplatePriceRows()
         if (rows) priceRows.value = rows
         await loadTemplateSheets()
@@ -1219,6 +1356,29 @@ const stopAutoQuery = () => {
     ElMessage.info('已请求停止批量查询')
 }
 
+// 批量查询时的跳过规则：某个「名称 + 磨损」在 N 小时内查过就不再重复查
+const AUTO_QUERY_SKIP_HOURS = 12
+
+// 拉取各磨损最近一次的查询时间，建 名称|磨损 → 时间戳(ms) 的索引
+const fetchRecentQueryTimes = async () => {
+    const map = new Map()
+    try {
+        const resp = await fetch(`${API_BASE_URL}/records`)
+        const result = await resp.json()
+        if (!result.success) return map
+        ;(result.data || []).forEach(r => {
+            const t = toDate(r.createdAt)
+            if (!t) return
+            const key = normName(r.name) + '|' + wearKey(r.wear)
+            const prev = map.get(key)
+            if (!prev || t.getTime() > prev) map.set(key, t.getTime())
+        })
+    } catch (error) {
+        console.warn('读取最近查询时间失败，本次不做跳过：', error)
+    }
+    return map
+}
+
 // 按模板 sheet 里的「名称 + 磨损」逐条查询，每条之间间隔 10 秒
 const autoQueryFromTemplate = async () => {
     if (autoQuerying.value) return
@@ -1239,13 +1399,30 @@ const autoQueryFromTemplate = async () => {
             return
         }
 
+        // 最近查询时间（用于「12 小时内已查过就跳过」）
+        const recentTimes = await fetchRecentQueryTimes()
+        const skipWindowMs = AUTO_QUERY_SKIP_HOURS * 60 * 60 * 1000
+
         autoProgress.value = { current: 0, total: rows.length, text: '' }
         let okCount = 0
         let skipCount = 0
+        let freshCount = 0
 
         for (let i = 0; i < rows.length; i++) {
             if (autoCancelled) break
             const row = rows[i]
+
+            // 12 小时内查过的磨损直接跳过（不请求接口、也不占用 10 秒间隔）
+            const lastAt = recentTimes.get(normName(row.name) + '|' + wearKey(row.wear))
+            if (lastAt && (Date.now() - lastAt) < skipWindowMs) {
+                skipCount++
+                freshCount++
+                autoProgress.value.current = i + 1
+                autoProgress.value.text = `已跳过（${AUTO_QUERY_SKIP_HOURS} 小时内查过）：${row.name} ${row.wear}`
+                console.log(`[跳过] ${row.name} ${row.wear}，上次查询：${formatTime(lastAt)}`)
+                continue
+            }
+
             autoProgress.value.text = `查询中 (${i + 1}/${rows.length})：${row.name} ${row.wear}`
 
             const item = findSellItem(row.name)
@@ -1261,6 +1438,7 @@ const autoQueryFromTemplate = async () => {
                 formData.value.maxWear = row.maxWear
                 await submitForm()
                 okCount++
+                recentTimes.set(normName(row.name) + '|' + wearKey(row.wear), Date.now())
             }
 
             autoProgress.value.current = i + 1
@@ -1275,10 +1453,11 @@ const autoQueryFromTemplate = async () => {
             }
         }
 
+        const skipText = skipCount ? `，跳过 ${skipCount} 条（其中 ${freshCount} 条为 ${AUTO_QUERY_SKIP_HOURS} 小时内已查过）` : ''
         if (autoCancelled) {
-            ElMessage.info(`批量查询已停止（成功 ${okCount}，跳过 ${skipCount}）`)
+            ElMessage.info(`批量查询已停止（成功 ${okCount}${skipText}）`)
         } else {
-            ElMessage.success(`批量查询完成（成功 ${okCount}，跳过 ${skipCount}）`)
+            ElMessage.success(`批量查询完成（成功 ${okCount}${skipText}）`)
         }
     } catch (error) {
         console.error('模板批量查询失败:', error)
@@ -1291,6 +1470,7 @@ const autoQueryFromTemplate = async () => {
 
 // 在页面加载完成后加载表格数据
 onMounted(async () => {
+    loadSaveTimes(); // 读取本地的「保存时间」记录
     await loadTokens();
     await loadSellItems();
     await loadTableData(); // 新增：加载表格数据
@@ -1300,17 +1480,62 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+/* 价格标签容器 */
+.price-container {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 4px;
+}
+
+/* 价格标签：替代 el-tag（尺寸对齐 el-tag--small），纯元素渲染，标签多时更流畅 */
+.price-pill {
+    display: inline-flex;
+    align-items: center;
+    height: 22px;
+    padding: 0 7px;
+    font-size: 12px;
+    line-height: 1;
+    border-radius: 4px;
+    border: 1px solid transparent;
+    box-sizing: border-box;
+    white-space: nowrap;
+    flex-shrink: 0;
+    background: #f4f4f5;
+    color: #909399;
+    will-change: transform;
+}
+
+/* 当前改价框选中的价位：蓝圈 + 加粗 */
+.price-pill-active {
+    box-shadow: 0 0 0 2px #409eff;
+    font-weight: 700;
+}
+
+/* 「空」标签 */
+.price-tag-empty {
+    background: #fafafa;
+    border: 1px dashed #c0c4cc;
+    color: #909399;
+}
+
+.price-pill-empty-active {
+    background: #ecf5ff;
+    border: 1px dashed #409eff;
+    color: #409eff;
+    font-weight: 700;
+}
+
 /* 价格标签可点击：提示可点、悬停微浮起 */
 .price-tag-clickable {
     cursor: pointer;
     user-select: none;
-    transition: transform 0.12s ease, filter 0.12s ease, box-shadow 0.12s ease;
+    transition: transform 0.12s ease, filter 0.12s ease;
 }
 
 .price-tag-clickable:hover {
     transform: translateY(-1px);
     filter: brightness(1.05);
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
 }
 
 .price-tag-clickable:active {

@@ -550,7 +550,9 @@ app.get('/api/records', async (req, res) => {
                     name: row.name,
                     wear: row.wear,
                     type: [row.type], // 使用数组存储多个平台
-                    price: [row.price ? { type: row.type, price: row.price } : null] // 存储每个平台的价格
+                    price: [row.price ? { type: row.type, price: row.price } : null], // 存储每个平台的价格
+                    createdAt: row.created_at || null, // 该磨损最近一次查询时间
+                    typeTimes: row.created_at ? { [row.type]: row.created_at } : {} // 各平台各自的查询时间
                 };
             } else {
                 // 如果已存在该商品记录，添加新的平台信息
@@ -559,6 +561,14 @@ app.get('/api/records', async (req, res) => {
                 }
                 if (row.price) {
                     mergedRecords[key].price.push({ type: row.type, price: row.price });
+                }
+                // 查询时间取最新的一条（记录按 created_at 倒序，但不同平台可能不同）
+                if (row.created_at) {
+                    const cur = mergedRecords[key].createdAt
+                    if (!cur || new Date(row.created_at) > new Date(cur)) {
+                        mergedRecords[key].createdAt = row.created_at
+                    }
+                    mergedRecords[key].typeTimes[row.type] = row.created_at
                 }
             }
         });
